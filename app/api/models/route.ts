@@ -1,4 +1,3 @@
-import { del, get, put } from "@vercel/blob";
 import { NextResponse } from "next/server";
 import {
   MANIFEST_PATH,
@@ -82,6 +81,7 @@ function assertUploadedBlob(value: UploadedBlobInfo | undefined, label: string) 
 }
 
 async function readManifest(): Promise<ModelManifest> {
+  const { get } = await import("@vercel/blob");
   const blob = await get(MANIFEST_PATH, { access: "public", useCache: false });
 
   if (!blob || blob.statusCode !== 200 || !blob.stream) {
@@ -92,6 +92,7 @@ async function readManifest(): Promise<ModelManifest> {
 }
 
 async function writeManifest(manifest: ModelManifest) {
+  const { put } = await import("@vercel/blob");
   await put(MANIFEST_PATH, JSON.stringify(manifest, null, 2), {
     access: "public",
     allowOverwrite: true,
@@ -208,6 +209,7 @@ export async function DELETE(request: Request) {
     }
 
     if (target.blobPathnames.length) {
+      const { del } = await import("@vercel/blob");
       await del(target.blobPathnames);
     }
 
