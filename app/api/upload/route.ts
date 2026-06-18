@@ -1,4 +1,4 @@
-import { handleUpload, type HandleUploadBody } from "@vercel/blob/client";
+import type { HandleUploadBody } from "@vercel/blob/client";
 import { NextResponse } from "next/server";
 import {
   DOWNLOAD_MODEL_EXTENSIONS,
@@ -60,6 +60,7 @@ export async function POST(request: Request) {
   }
 
   try {
+    const { handleUpload } = await import("@vercel/blob/client");
     const result = await handleUpload({
       request,
       body,
