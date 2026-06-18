@@ -1,6 +1,5 @@
 "use client";
 
-import { upload } from "@vercel/blob/client";
 import Link from "next/link";
 import Script from "next/script";
 import type { FormEvent } from "react";
@@ -14,6 +13,7 @@ import {
   isAllowedPreviewModel,
   sanitizeFileName,
   type ModelListing,
+  type UploadedBlobInfo,
 } from "@/lib/model-store";
 
 type ModelsResponse = {
@@ -22,8 +22,6 @@ type ModelsResponse = {
   models?: ModelListing[];
   error?: string;
 };
-
-type UploadedBlobResult = Awaited<ReturnType<typeof upload>>;
 
 const previewAccept = PREVIEW_MODEL_EXTENSIONS.join(",");
 const downloadAccept = DOWNLOAD_MODEL_EXTENSIONS.join(",");
@@ -91,7 +89,8 @@ export default function AdminPage() {
     folder: string,
     progressStart: number,
     progressEnd: number,
-  ) {
+  ): Promise<UploadedBlobInfo> {
+    const { upload } = await import("@vercel/blob/client");
     const pathname = `${MODEL_UPLOAD_PREFIX}${folder}/${kind}-${sanitizeFileName(file.name)}`;
 
     return upload(pathname, file, {
@@ -145,7 +144,7 @@ export default function AdminPage() {
         0,
         downloadFile ? 55 : 85,
       );
-      let downloadBlob: UploadedBlobResult | undefined;
+      let downloadBlob: UploadedBlobInfo | undefined;
 
       if (downloadFile) {
         setStatus("Uploading download package");
