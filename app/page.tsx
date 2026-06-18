@@ -158,6 +158,9 @@ export default function Home() {
             <a className="hover:text-white" href="#market">
               Assets
             </a>
+            <Link className="hover:text-white" href="/models">
+              3D Models
+            </Link>
             <a className="hover:text-white" href="#custom">
               Custom work
             </a>
@@ -196,6 +199,12 @@ export default function Home() {
               >
                 Browse assets
               </a>
+              <Link
+                href="/models"
+                className="rounded-md border border-white/28 px-5 py-3 text-sm font-semibold text-white hover:bg-white/10"
+              >
+                Uploaded models
+              </Link>
               <a
                 href="#custom"
                 className="rounded-md border border-white/28 px-5 py-3 text-sm font-semibold text-white hover:bg-white/10"
@@ -548,9 +557,14 @@ export default function Home() {
       <footer className="bg-[#f7f4ec] px-5 py-8 sm:px-8">
         <div className="mx-auto flex max-w-7xl flex-col justify-between gap-4 border-t border-[#d9d0bd] pt-6 text-sm text-[#586158] sm:flex-row">
           <p>Habesha Mesh, Ethiopian 3D assets for real-time and cinematic work.</p>
-          <Link className="font-semibold text-[#255c43] hover:text-[#18211d]" href="/admin">
-            Admin listing manager
-          </Link>
+          <div className="flex flex-wrap gap-4">
+            <Link className="font-semibold text-[#255c43] hover:text-[#18211d]" href="/models">
+              Uploaded model gallery
+            </Link>
+            <Link className="font-semibold text-[#255c43] hover:text-[#18211d]" href="/admin">
+              Admin listing manager
+            </Link>
+          </div>
         </div>
       </footer>
     </main>
