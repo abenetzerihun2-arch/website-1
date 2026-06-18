@@ -1,0 +1,5 @@
+dist
+outputs
+work
+.wrangler
+node_modules
