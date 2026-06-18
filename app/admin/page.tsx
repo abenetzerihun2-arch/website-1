@@ -1,126 +1,235 @@
 "use client";
 
-/* eslint-disable @next/next/no-img-element */
-import type { ChangeEvent } from "react";
+import { upload } from "@vercel/blob/client";
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import Script from "next/script";
+import type { FormEvent } from "react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  DOWNLOAD_MODEL_EXTENSIONS,
+  MODEL_UPLOAD_PREFIX,
+  PREVIEW_MODEL_EXTENSIONS,
+  formatBytes,
+  isAllowedDownloadModel,
+  isAllowedPreviewModel,
+  sanitizeFileName,
+  type ModelListing,
+} from "@/lib/model-store";
 
-type FileGroup = "model" | "textures" | "previews" | "docs";
-
-type ListingDraft = {
-  title: string;
-  slug: string;
-  category: string;
-  price: string;
-  license: string;
-  formats: string;
-  polycount: string;
-  textureResolution: string;
-  engine: string;
-  status: string;
-  description: string;
+type ModelsResponse = {
+  configured?: boolean;
+  message?: string;
+  models?: ModelListing[];
+  error?: string;
 };
 
-const initialDraft: ListingDraft = {
-  title: "Rock-Hewn Church Kit",
-  slug: "rock-hewn-church-kit",
-  category: "Architecture",
-  price: "149",
-  license: "Studio",
-  formats: "GLB, FBX, Blend",
-  polycount: "18k tris",
-  textureResolution: "4K",
-  engine: "Unreal, Unity, WebGL",
-  status: "Draft",
-  description:
-    "Modular Ethiopian-inspired stone architecture kit with clean UVs, PBR textures, and source files.",
-};
+type UploadedBlobResult = Awaited<ReturnType<typeof upload>>;
 
-const textureSlots = [
-  "Base color",
-  "Normal",
-  "Roughness",
-  "Metallic",
-  "Ambient occlusion",
-  "Emission",
-];
+const previewAccept = PREVIEW_MODEL_EXTENSIONS.join(",");
+const downloadAccept = DOWNLOAD_MODEL_EXTENSIONS.join(",");
 
-const fileAccept: Record<FileGroup, string> = {
-  model: ".zip,.glb,.gltf,.fbx,.obj,.blend,.usdz,.unitypackage,.uasset",
-  textures: ".png,.jpg,.jpeg,.tga,.webp,.exr",
-  previews: ".png,.jpg,.jpeg,.webp,.mp4,.webm",
-  docs: ".txt,.pdf,.md",
-};
+function createUploadFolder() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
 
-function formatBytes(size: number) {
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
-  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
-function fileListToArray(files: FileList | null) {
-  return files ? Array.from(files) : [];
+function formatDate(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Just now";
+
+  return new Intl.DateTimeFormat("en", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
 }
 
 export default function AdminPage() {
-  const [draft, setDraft] = useState<ListingDraft>(initialDraft);
-  const [modelFiles, setModelFiles] = useState<File[]>([]);
-  const [textureFiles, setTextureFiles] = useState<File[]>([]);
-  const [previewFiles, setPreviewFiles] = useState<File[]>([]);
-  const [docFiles, setDocFiles] = useState<File[]>([]);
-  const [selectedSlot, setSelectedSlot] = useState("Base color");
-  const [savedAt, setSavedAt] = useState<string | null>(null);
+  const [password, setPassword] = useState("");
+  const [title, setTitle] = useState("");
+  const [category, setCategory] = useState("Architecture");
+  const [description, setDescription] = useState("");
+  const [previewFile, setPreviewFile] = useState<File | null>(null);
+  const [downloadFile, setDownloadFile] = useState<File | null>(null);
+  const [models, setModels] = useState<ModelListing[]>([]);
+  const [configured, setConfigured] = useState(true);
+  const [status, setStatus] = useState("Ready");
+  const [error, setError] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [isUploading, setIsUploading] = useState(false);
 
-  const allFiles = [...modelFiles, ...textureFiles, ...previewFiles, ...docFiles];
-  const totalSize = allFiles.reduce((sum, file) => sum + file.size, 0);
+  const totalSize = useMemo(() => {
+    return (previewFile?.size ?? 0) + (downloadFile?.size ?? 0);
+  }, [downloadFile, previewFile]);
 
-  const checks = useMemo(
-    () => [
-      {
-        label: "Model package attached",
-        done: modelFiles.some((file) => /\.(zip|glb|gltf|fbx|blend|obj|usdz)$/i.test(file.name)),
-      },
-      {
-        label: "Texture maps attached",
-        done: textureFiles.length >= 3,
-      },
-      {
-        label: "Preview media attached",
-        done: previewFiles.length >= 2,
-      },
-      {
-        label: "Price and license set",
-        done: Number(draft.price) > 0 && draft.license.length > 0,
-      },
-      {
-        label: "Description ready",
-        done: draft.description.trim().length >= 80,
-      },
-    ],
-    [draft.description, draft.license, draft.price, modelFiles, previewFiles, textureFiles],
-  );
+  useEffect(() => {
+    void refreshModels();
+  }, []);
 
-  const readyCount = checks.filter((check) => check.done).length;
-  const canPublish = readyCount === checks.length;
+  async function refreshModels() {
+    try {
+      const response = await fetch("/api/models", { cache: "no-store" });
+      const data = (await response.json()) as ModelsResponse;
 
-  function updateDraft(field: keyof ListingDraft, value: string) {
-    setDraft((current) => ({ ...current, [field]: value }));
+      if (!response.ok) {
+        throw new Error(data.error ?? "Could not load uploaded models.");
+      }
+
+      setConfigured(data.configured !== false);
+      setModels(data.models ?? []);
+      if (data.message) setStatus(data.message);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Could not load models.");
+    }
   }
 
-  function handleFiles(group: FileGroup, event: ChangeEvent<HTMLInputElement>) {
-    const files = fileListToArray(event.target.files);
-    if (group === "model") setModelFiles(files);
-    if (group === "textures") setTextureFiles(files);
-    if (group === "previews") setPreviewFiles(files);
-    if (group === "docs") setDocFiles(files);
+  async function uploadAsset(
+    kind: "preview" | "download",
+    file: File,
+    folder: string,
+    progressStart: number,
+    progressEnd: number,
+  ) {
+    const pathname = `${MODEL_UPLOAD_PREFIX}${folder}/${kind}-${sanitizeFileName(file.name)}`;
+
+    return upload(pathname, file, {
+      access: "public",
+      clientPayload: JSON.stringify({ kind }),
+      contentType: file.type || undefined,
+      handleUploadUrl: "/api/upload",
+      headers: { "x-admin-password": password },
+      multipart: file.size > 8 * 1024 * 1024,
+      onUploadProgress: ({ percentage }) => {
+        const scaled = progressStart + (percentage / 100) * (progressEnd - progressStart);
+        setUploadProgress(Math.round(scaled));
+      },
+    });
   }
 
-  function saveDraft() {
-    setSavedAt(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+
+    if (!password.trim()) {
+      setError("Enter the admin password.");
+      return;
+    }
+
+    if (!previewFile) {
+      setError("Choose a GLB or GLTF preview model.");
+      return;
+    }
+
+    if (!isAllowedPreviewModel(previewFile.name)) {
+      setError("The rotatable preview must be a GLB or GLTF file.");
+      return;
+    }
+
+    if (downloadFile && !isAllowedDownloadModel(downloadFile.name)) {
+      setError("The download package file type is not allowed.");
+      return;
+    }
+
+    setIsUploading(true);
+    setStatus("Uploading preview model");
+    setUploadProgress(0);
+
+    try {
+      const folder = createUploadFolder();
+      const previewBlob = await uploadAsset(
+        "preview",
+        previewFile,
+        folder,
+        0,
+        downloadFile ? 55 : 85,
+      );
+      let downloadBlob: UploadedBlobResult | undefined;
+
+      if (downloadFile) {
+        setStatus("Uploading download package");
+        downloadBlob = await uploadAsset("download", downloadFile, folder, 55, 85);
+      }
+
+      setStatus("Saving listing");
+      const response = await fetch("/api/models", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-admin-password": password,
+        },
+        body: JSON.stringify({
+          category,
+          description,
+          download: downloadBlob,
+          model: previewBlob,
+          title,
+        }),
+      });
+      const data = (await response.json()) as ModelsResponse & { model?: ModelListing };
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "Could not save the model listing.");
+      }
+
+      setModels(data.models ?? (data.model ? [data.model, ...models] : models));
+      setTitle("");
+      setDescription("");
+      setPreviewFile(null);
+      setDownloadFile(null);
+      setUploadProgress(100);
+      setStatus("Published");
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Upload failed.");
+      setStatus("Upload failed");
+    } finally {
+      setIsUploading(false);
+    }
+  }
+
+  async function deleteModel(model: ModelListing) {
+    if (!password.trim()) {
+      setError("Enter the admin password before deleting.");
+      return;
+    }
+
+    if (!window.confirm(`Delete ${model.title}?`)) return;
+
+    setError(null);
+    setStatus("Deleting listing");
+
+    try {
+      const response = await fetch("/api/models", {
+        method: "DELETE",
+        headers: {
+          "content-type": "application/json",
+          "x-admin-password": password,
+        },
+        body: JSON.stringify({ id: model.id }),
+      });
+      const data = (await response.json()) as ModelsResponse;
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "Could not delete the model.");
+      }
+
+      setModels(data.models ?? []);
+      setStatus("Deleted");
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Delete failed.");
+      setStatus("Delete failed");
+    }
   }
 
   return (
     <main className="min-h-screen bg-[#f7f4ec] text-[#18211d]">
+      <Script
+        src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"
+        strategy="afterInteractive"
+        type="module"
+      />
+
       <header className="border-b border-[#d9d0bd] bg-[#17251f] text-white">
         <div className="mx-auto flex max-w-7xl flex-col gap-4 px-5 py-5 sm:px-8 md:flex-row md:items-center md:justify-between">
           <Link href="/" className="flex items-center gap-3 font-semibold">
@@ -131,18 +240,17 @@ export default function AdminPage() {
           </Link>
           <nav className="flex flex-wrap gap-2 text-sm">
             <Link
+              href="/models"
+              className="rounded-md border border-white/20 px-4 py-2 font-semibold text-white hover:bg-white/10"
+            >
+              Public models
+            </Link>
+            <Link
               href="/"
               className="rounded-md border border-white/20 px-4 py-2 font-semibold text-white hover:bg-white/10"
             >
               Storefront
             </Link>
-            <button
-              type="button"
-              onClick={saveDraft}
-              className="rounded-md bg-[#d7b45c] px-4 py-2 font-semibold text-[#111a17] hover:bg-[#e3c66c]"
-            >
-              + Save draft
-            </button>
           </nav>
         </div>
       </header>
@@ -150,10 +258,10 @@ export default function AdminPage() {
       <section className="mx-auto max-w-7xl px-5 py-8 sm:px-8">
         <div className="mb-6 grid gap-4 md:grid-cols-4">
           {[
-            ["Listings", "5 active"],
-            ["Draft status", savedAt ? `Saved ${savedAt}` : "Unsaved"],
-            ["Package size", formatBytes(totalSize)],
-            ["Readiness", `${readyCount}/${checks.length}`],
+            ["Uploaded models", models.length.toString()],
+            ["Storage", configured ? "Connected" : "Needs setup"],
+            ["Selected files", previewFile || downloadFile ? "Ready" : "Empty"],
+            ["Upload size", formatBytes(totalSize)],
           ].map(([label, value]) => (
             <div key={label} className="rounded-lg border border-[#d5cab4] bg-white p-4 shadow-sm">
               <p className="text-sm font-semibold text-[#8d3328]">{label}</p>
@@ -162,298 +270,221 @@ export default function AdminPage() {
           ))}
         </div>
 
-        <div className="grid gap-6 lg:grid-cols-[1fr_380px]">
-          <div className="space-y-6">
-            <section className="rounded-lg border border-[#d5cab4] bg-white p-5 shadow-sm">
-              <div className="mb-5 flex flex-col justify-between gap-3 sm:flex-row sm:items-end">
-                <div>
-                  <p className="text-sm font-semibold text-[#8d3328]">Listing details</p>
-                  <h1 className="mt-1 text-3xl font-semibold">New 3D asset listing</h1>
-                </div>
+        <div className="grid gap-6 lg:grid-cols-[420px_1fr]">
+          <form
+            onSubmit={handleSubmit}
+            className="h-fit rounded-lg border border-[#d5cab4] bg-white p-5 shadow-sm lg:sticky lg:top-5"
+          >
+            <div className="mb-5">
+              <p className="text-sm font-semibold text-[#8d3328]">Upload model</p>
+              <h1 className="mt-1 text-3xl font-semibold">Admin publishing</h1>
+            </div>
+
+            <div className="space-y-4">
+              <label className="block">
+                <span className="mb-2 block text-sm font-semibold">Admin password</span>
+                <input
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  type="password"
+                  autoComplete="current-password"
+                  className="h-11 w-full rounded-md border border-[#cfc4ad] px-3 text-sm outline-none ring-[#255c43] focus:ring-2"
+                />
+              </label>
+
+              <label className="block">
+                <span className="mb-2 block text-sm font-semibold">Title</span>
+                <input
+                  value={title}
+                  onChange={(event) => setTitle(event.target.value)}
+                  placeholder="Rock-hewn church model"
+                  className="h-11 w-full rounded-md border border-[#cfc4ad] px-3 text-sm outline-none ring-[#255c43] focus:ring-2"
+                />
+              </label>
+
+              <label className="block">
+                <span className="mb-2 block text-sm font-semibold">Category</span>
                 <select
-                  value={draft.status}
-                  onChange={(event) => updateDraft("status", event.target.value)}
-                  className="h-11 rounded-md border border-[#cfc4ad] bg-white px-3 text-sm outline-none ring-[#255c43] focus:ring-2"
+                  value={category}
+                  onChange={(event) => setCategory(event.target.value)}
+                  className="h-11 w-full rounded-md border border-[#cfc4ad] bg-white px-3 text-sm outline-none ring-[#255c43] focus:ring-2"
                 >
-                  <option>Draft</option>
-                  <option>Review</option>
-                  <option>Published</option>
-                  <option>Archived</option>
+                  <option>Architecture</option>
+                  <option>Props</option>
+                  <option>Environments</option>
+                  <option>Kits</option>
+                  <option>Characters</option>
+                  <option>Materials</option>
                 </select>
-              </div>
+              </label>
 
-              <div className="grid gap-4 md:grid-cols-2">
-                <label>
-                  <span className="mb-2 block text-sm font-semibold">Title</span>
-                  <input
-                    value={draft.title}
-                    onChange={(event) => updateDraft("title", event.target.value)}
-                    className="h-11 w-full rounded-md border border-[#cfc4ad] px-3 text-sm outline-none ring-[#255c43] focus:ring-2"
-                  />
-                </label>
-                <label>
-                  <span className="mb-2 block text-sm font-semibold">Slug</span>
-                  <input
-                    value={draft.slug}
-                    onChange={(event) => updateDraft("slug", event.target.value)}
-                    className="h-11 w-full rounded-md border border-[#cfc4ad] px-3 text-sm outline-none ring-[#255c43] focus:ring-2"
-                  />
-                </label>
-                <label>
-                  <span className="mb-2 block text-sm font-semibold">Category</span>
-                  <select
-                    value={draft.category}
-                    onChange={(event) => updateDraft("category", event.target.value)}
-                    className="h-11 w-full rounded-md border border-[#cfc4ad] bg-white px-3 text-sm outline-none ring-[#255c43] focus:ring-2"
-                  >
-                    <option>Architecture</option>
-                    <option>Props</option>
-                    <option>Environments</option>
-                    <option>Kits</option>
-                    <option>Materials</option>
-                  </select>
-                </label>
-                <label>
-                  <span className="mb-2 block text-sm font-semibold">Price USD</span>
-                  <input
-                    value={draft.price}
-                    inputMode="decimal"
-                    onChange={(event) => updateDraft("price", event.target.value)}
-                    className="h-11 w-full rounded-md border border-[#cfc4ad] px-3 text-sm outline-none ring-[#255c43] focus:ring-2"
-                  />
-                </label>
-                <label>
-                  <span className="mb-2 block text-sm font-semibold">License</span>
-                  <select
-                    value={draft.license}
-                    onChange={(event) => updateDraft("license", event.target.value)}
-                    className="h-11 w-full rounded-md border border-[#cfc4ad] bg-white px-3 text-sm outline-none ring-[#255c43] focus:ring-2"
-                  >
-                    <option>Indie</option>
-                    <option>Studio</option>
-                    <option>Enterprise</option>
-                    <option>Exclusive buyout</option>
-                  </select>
-                </label>
-                <label>
-                  <span className="mb-2 block text-sm font-semibold">Formats</span>
-                  <input
-                    value={draft.formats}
-                    onChange={(event) => updateDraft("formats", event.target.value)}
-                    className="h-11 w-full rounded-md border border-[#cfc4ad] px-3 text-sm outline-none ring-[#255c43] focus:ring-2"
-                  />
-                </label>
-                <label>
-                  <span className="mb-2 block text-sm font-semibold">Polycount</span>
-                  <input
-                    value={draft.polycount}
-                    onChange={(event) => updateDraft("polycount", event.target.value)}
-                    className="h-11 w-full rounded-md border border-[#cfc4ad] px-3 text-sm outline-none ring-[#255c43] focus:ring-2"
-                  />
-                </label>
-                <label>
-                  <span className="mb-2 block text-sm font-semibold">Texture resolution</span>
-                  <input
-                    value={draft.textureResolution}
-                    onChange={(event) => updateDraft("textureResolution", event.target.value)}
-                    className="h-11 w-full rounded-md border border-[#cfc4ad] px-3 text-sm outline-none ring-[#255c43] focus:ring-2"
-                  />
-                </label>
-                <label className="md:col-span-2">
-                  <span className="mb-2 block text-sm font-semibold">Target engines</span>
-                  <input
-                    value={draft.engine}
-                    onChange={(event) => updateDraft("engine", event.target.value)}
-                    className="h-11 w-full rounded-md border border-[#cfc4ad] px-3 text-sm outline-none ring-[#255c43] focus:ring-2"
-                  />
-                </label>
-                <label className="md:col-span-2">
-                  <span className="mb-2 block text-sm font-semibold">Description</span>
-                  <textarea
-                    value={draft.description}
-                    onChange={(event) => updateDraft("description", event.target.value)}
-                    rows={4}
-                    className="w-full resize-none rounded-md border border-[#cfc4ad] px-3 py-3 text-sm leading-6 outline-none ring-[#255c43] focus:ring-2"
-                  />
-                </label>
-              </div>
-            </section>
+              <label className="block">
+                <span className="mb-2 block text-sm font-semibold">Description</span>
+                <textarea
+                  value={description}
+                  onChange={(event) => setDescription(event.target.value)}
+                  rows={4}
+                  placeholder="Short customer-facing model description"
+                  className="w-full resize-none rounded-md border border-[#cfc4ad] px-3 py-3 text-sm leading-6 outline-none ring-[#255c43] focus:ring-2"
+                />
+              </label>
 
-            <section className="rounded-lg border border-[#d5cab4] bg-white p-5 shadow-sm">
-              <div className="mb-5 flex flex-col justify-between gap-3 sm:flex-row sm:items-end">
-                <div>
-                  <p className="text-sm font-semibold text-[#8d3328]">Upload package</p>
-                  <h2 className="mt-1 text-2xl font-semibold">Files and texture maps</h2>
-                </div>
-                <select
-                  value={selectedSlot}
-                  onChange={(event) => setSelectedSlot(event.target.value)}
-                  className="h-11 rounded-md border border-[#cfc4ad] bg-white px-3 text-sm outline-none ring-[#255c43] focus:ring-2"
-                >
-                  {textureSlots.map((slot) => (
-                    <option key={slot}>{slot}</option>
-                  ))}
-                </select>
-              </div>
+              <UploadField
+                accept={previewAccept}
+                caption="GLB or GLTF"
+                file={previewFile}
+                label="Rotatable preview model"
+                onChange={setPreviewFile}
+              />
 
-              <div className="grid gap-4 md:grid-cols-2">
-                <UploadBox
-                  title="Model package"
-                  caption="ZIP, GLB, FBX, Blend, OBJ, USDZ"
-                  accept={fileAccept.model}
-                  files={modelFiles}
-                  onChange={(event) => handleFiles("model", event)}
-                />
-                <UploadBox
-                  title={`${selectedSlot} textures`}
-                  caption="PNG, JPG, TGA, WebP, EXR"
-                  accept={fileAccept.textures}
-                  files={textureFiles}
-                  multiple
-                  onChange={(event) => handleFiles("textures", event)}
-                />
-                <UploadBox
-                  title="Preview renders"
-                  caption="Images or short turntable videos"
-                  accept={fileAccept.previews}
-                  files={previewFiles}
-                  multiple
-                  onChange={(event) => handleFiles("previews", event)}
-                />
-                <UploadBox
-                  title="Documentation"
-                  caption="README, license, setup notes"
-                  accept={fileAccept.docs}
-                  files={docFiles}
-                  multiple
-                  onChange={(event) => handleFiles("docs", event)}
+              <UploadField
+                accept={downloadAccept}
+                caption="ZIP, Blend, FBX, OBJ, GLB, USDZ"
+                file={downloadFile}
+                label="Download package"
+                onChange={setDownloadFile}
+              />
+            </div>
+
+            <div className="mt-5 rounded-md bg-[#f2eee4] p-3">
+              <div className="flex justify-between gap-3 text-sm font-semibold">
+                <span>{status}</span>
+                <span>{uploadProgress}%</span>
+              </div>
+              <div className="mt-3 h-2 overflow-hidden rounded-full bg-white">
+                <div
+                  className="h-full bg-[#255c43] transition-all"
+                  style={{ width: `${uploadProgress}%` }}
                 />
               </div>
-            </section>
-          </div>
+            </div>
 
-          <aside className="space-y-6">
-            <section className="rounded-lg border border-[#d5cab4] bg-[#fffdf8] p-5 shadow-sm">
-              <p className="text-sm font-semibold text-[#8d3328]">Marketplace preview</p>
-              <div className="mt-4 overflow-hidden rounded-lg border border-[#d5cab4] bg-white">
-                <div className="aspect-[5/4] bg-[#15251f]">
-                  <img
-                    src="/assets/asset-rock-church.png"
-                    alt=""
-                    className="h-full w-full object-cover"
-                  />
-                </div>
-                <div className="p-4">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-semibold text-[#8d3328]">{draft.category}</p>
-                      <h2 className="mt-1 text-xl font-semibold">{draft.title || "Untitled asset"}</h2>
-                    </div>
-                    <p className="text-lg font-semibold text-[#255c43]">
-                      ${Number(draft.price || 0).toLocaleString("en-US")}
-                    </p>
-                  </div>
-                  <p className="mt-3 text-sm leading-6 text-[#586158]">{draft.description}</p>
-                  <div className="mt-4 flex flex-wrap gap-2">
-                    {[draft.formats, draft.polycount, draft.textureResolution, draft.license]
-                      .filter(Boolean)
-                      .map((tag) => (
-                        <span
-                          key={tag}
-                          className="rounded-md border border-[#d5cab4] px-2.5 py-1 text-xs font-semibold text-[#4e574f]"
-                        >
-                          {tag}
-                        </span>
-                      ))}
-                  </div>
-                </div>
+            {error ? (
+              <p className="mt-4 rounded-md border border-[#e6b2aa] bg-[#fff5f2] p-3 text-sm font-medium text-[#8d3328]">
+                {error}
+              </p>
+            ) : null}
+
+            <button
+              type="submit"
+              disabled={isUploading}
+              className="mt-5 h-11 w-full rounded-md bg-[#18211d] text-sm font-semibold text-white enabled:hover:bg-[#255c43] disabled:cursor-not-allowed disabled:opacity-55"
+            >
+              {isUploading ? "Uploading..." : "Publish model"}
+            </button>
+          </form>
+
+          <section className="rounded-lg border border-[#d5cab4] bg-[#fffdf8] p-5 shadow-sm">
+            <div className="mb-5 flex flex-col justify-between gap-3 sm:flex-row sm:items-end">
+              <div>
+                <p className="text-sm font-semibold text-[#8d3328]">Live catalog</p>
+                <h2 className="mt-1 text-2xl font-semibold">Uploaded 3D models</h2>
               </div>
-            </section>
-
-            <section className="rounded-lg border border-[#d5cab4] bg-white p-5 shadow-sm">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <p className="text-sm font-semibold text-[#8d3328]">Readiness</p>
-                  <h2 className="mt-1 text-2xl font-semibold">{readyCount}/{checks.length} complete</h2>
-                </div>
-                <span
-                  className={`rounded-md px-3 py-1 text-sm font-semibold ${
-                    canPublish ? "bg-[#255c43] text-white" : "bg-[#f2eee4] text-[#586158]"
-                  }`}
-                >
-                  {canPublish ? "Ready" : "Draft"}
-                </span>
-              </div>
-
-              <div className="mt-5 space-y-3">
-                {checks.map((check) => (
-                  <div
-                    key={check.label}
-                    className="flex items-center gap-3 rounded-md border border-[#e2d8c6] p-3"
-                  >
-                    <span
-                      className={`grid h-7 w-7 place-items-center rounded-md text-sm font-semibold ${
-                        check.done ? "bg-[#255c43] text-white" : "bg-[#f2eee4] text-[#586158]"
-                      }`}
-                    >
-                      {check.done ? "OK" : "!"}
-                    </span>
-                    <p className="text-sm font-medium">{check.label}</p>
-                  </div>
-                ))}
-              </div>
-
               <button
                 type="button"
-                disabled={!canPublish}
-                className="mt-5 h-11 w-full rounded-md bg-[#18211d] text-sm font-semibold text-white enabled:hover:bg-[#255c43] disabled:cursor-not-allowed disabled:opacity-45"
+                onClick={refreshModels}
+                className="h-10 rounded-md border border-[#cfc4ad] bg-white px-4 text-sm font-semibold hover:border-[#255c43]"
               >
-                Publish listing
+                Refresh
               </button>
-            </section>
+            </div>
 
-            <section className="rounded-lg border border-[#d5cab4] bg-[#17251f] p-5 text-white shadow-sm">
-              <p className="text-sm font-semibold text-[#d7b45c]">Package manifest</p>
-              <div className="mt-4 space-y-3">
-                {allFiles.length ? (
-                  allFiles.slice(0, 8).map((file) => (
-                    <div key={`${file.name}-${file.size}`} className="flex justify-between gap-3 text-sm">
-                      <span className="min-w-0 truncate">{file.name}</span>
-                      <span className="shrink-0 text-white/65">{formatBytes(file.size)}</span>
+            {models.length ? (
+              <div className="grid gap-5 xl:grid-cols-2">
+                {models.map((model) => (
+                  <article
+                    key={model.id}
+                    className="overflow-hidden rounded-lg border border-[#d5cab4] bg-white shadow-sm"
+                  >
+                    <model-viewer
+                      alt={model.title}
+                      ar
+                      auto-rotate
+                      camera-controls
+                      loading="lazy"
+                      reveal="auto"
+                      shadow-intensity="1"
+                      src={model.modelUrl}
+                      style={{ display: "block", height: "280px", width: "100%" }}
+                      touch-action="pan-y"
+                    />
+                    <div className="p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-sm font-semibold text-[#8d3328]">
+                            {model.category}
+                          </p>
+                          <h3 className="mt-1 truncate text-xl font-semibold">{model.title}</h3>
+                        </div>
+                        <span className="shrink-0 rounded-md bg-[#f2eee4] px-2.5 py-1 text-xs font-semibold text-[#3a453d]">
+                          {model.format}
+                        </span>
+                      </div>
+                      <p className="mt-3 line-clamp-3 text-sm leading-6 text-[#586158]">
+                        {model.description}
+                      </p>
+                      <div className="mt-4 flex flex-wrap gap-2 text-xs font-semibold text-[#4e574f]">
+                        <span className="rounded-md border border-[#d5cab4] px-2.5 py-1">
+                          {formatBytes(model.size)}
+                        </span>
+                        <span className="rounded-md border border-[#d5cab4] px-2.5 py-1">
+                          {formatDate(model.uploadedAt)}
+                        </span>
+                      </div>
+                      <div className="mt-4 flex gap-2">
+                        <a
+                          href={model.downloadUrl}
+                          className="flex h-10 flex-1 items-center justify-center rounded-md bg-[#255c43] text-sm font-semibold text-white hover:bg-[#1f4c39]"
+                        >
+                          Download
+                        </a>
+                        <button
+                          type="button"
+                          onClick={() => void deleteModel(model)}
+                          className="h-10 rounded-md border border-[#d5cab4] px-4 text-sm font-semibold text-[#8d3328] hover:bg-[#fff5f2]"
+                        >
+                          Delete
+                        </button>
+                      </div>
                     </div>
-                  ))
-                ) : (
-                  <p className="text-sm leading-6 text-white/70">No files selected.</p>
-                )}
+                  </article>
+                ))}
               </div>
-            </section>
-          </aside>
+            ) : (
+              <div className="grid min-h-80 place-items-center rounded-lg border border-dashed border-[#cfc4ad] bg-white p-8 text-center">
+                <div>
+                  <p className="text-lg font-semibold">No uploaded models yet</p>
+                  <p className="mt-2 max-w-md text-sm leading-6 text-[#586158]">
+                    Published models will appear here and on the public model gallery.
+                  </p>
+                </div>
+              </div>
+            )}
+          </section>
         </div>
       </section>
     </main>
   );
 }
 
-function UploadBox({
-  title,
-  caption,
+function UploadField({
   accept,
-  files,
-  multiple = false,
+  caption,
+  file,
+  label,
   onChange,
 }: {
-  title: string;
-  caption: string;
   accept: string;
-  files: File[];
-  multiple?: boolean;
-  onChange: (event: ChangeEvent<HTMLInputElement>) => void;
+  caption: string;
+  file: File | null;
+  label: string;
+  onChange: (file: File | null) => void;
 }) {
   return (
     <label className="block rounded-lg border border-dashed border-[#bfb39e] bg-[#faf7ef] p-4 hover:border-[#255c43]">
       <span className="flex items-center justify-between gap-3">
         <span>
-          <span className="block text-sm font-semibold">{title}</span>
+          <span className="block text-sm font-semibold">{label}</span>
           <span className="mt-1 block text-sm text-[#667066]">{caption}</span>
         </span>
         <span className="grid h-10 w-10 shrink-0 place-items-center rounded-md bg-[#255c43] text-lg font-semibold text-white">
@@ -463,14 +494,11 @@ function UploadBox({
       <input
         type="file"
         accept={accept}
-        multiple={multiple}
-        onChange={onChange}
+        onChange={(event) => onChange(event.target.files?.[0] ?? null)}
         className="sr-only"
       />
-      <span className="mt-4 block rounded-md border border-[#e2d8c6] bg-white p-3 text-sm text-[#586158]">
-        {files.length
-          ? files.map((file) => file.name).join(", ")
-          : "Select files"}
+      <span className="mt-4 block min-h-12 rounded-md border border-[#e2d8c6] bg-white p-3 text-sm text-[#586158]">
+        {file ? `${file.name} (${formatBytes(file.size)})` : "Select file"}
       </span>
     </label>
   );
